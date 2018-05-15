@@ -78,7 +78,7 @@ public class ElasticsearchSinkTestBase extends ESIntegTestCase {
 
   protected Struct createRecord(Schema schema) {
     Struct struct = new Struct(schema);
-    struct.put("user", "Liquan");
+    struct.put("user", "smarath");
     struct.put("message", "trying out Elastic Search.");
     return struct;
   }
@@ -110,7 +110,6 @@ public class ElasticsearchSinkTestBase extends ESIntegTestCase {
     final JsonObject result = client.search("", index, null);
 
     final JsonArray rawHits = result.getAsJsonObject("hits").getAsJsonArray("hits");
-
     assertEquals(records.size(), rawHits.size());
 
     Map<String, String> hits = new HashMap<>();
@@ -120,10 +119,9 @@ public class ElasticsearchSinkTestBase extends ESIntegTestCase {
       final String source = hitData.get("_source").getAsJsonObject().toString();
       hits.put(id, source);
     }
-
     for (Object record : records) {
       if (record instanceof SinkRecord) {
-        IndexableRecord indexableRecord = converter.convertRecord((SinkRecord) record, index, TYPE, ignoreKey, ignoreSchema);
+        IndexableRecord indexableRecord = converter.convertRecord((SinkRecord) record,((SinkRecord) record).key().toString(), index, TYPE, ignoreKey, ignoreSchema);
         assertEquals(indexableRecord.payload, hits.get(indexableRecord.key.id));
       } else {
         assertEquals(record, hits.get("key"));

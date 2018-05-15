@@ -23,6 +23,9 @@ import org.apache.kafka.connect.sink.SinkRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import java.io.IOException;
 import java.util.Collections;
 import java.util.Collection;
@@ -54,7 +57,9 @@ public class ElasticsearchWriter {
 
   private final Set<String> existingMappings;
   private final BehaviorOnMalformedDoc behaviorOnMalformedDoc;
-
+  private final String keyObjIndexName = "indexName";
+  private final String keyObjId = "uuid";
+  
   ElasticsearchWriter(
       ElasticsearchClient client,
       String type,
@@ -237,6 +242,8 @@ public class ElasticsearchWriter {
 
   public void write(Collection<SinkRecord> records) {
     for (SinkRecord sinkRecord : records) {
+      final String indexOverride = topicToIndexMap.get(sinkRecord.topic());
+      String index = indexOverride != null ? indexOverride : sinkRecord.topic();
       // Preemptively skip records with null values if they're going to be ignored anyways
       if (ignoreRecord(sinkRecord)) {
         log.debug(
@@ -248,12 +255,27 @@ public class ElasticsearchWriter {
         continue;
       }
 
-      final String indexOverride = topicToIndexMap.get(sinkRecord.topic());
-      final String index = indexOverride != null ? indexOverride : sinkRecord.topic();
       final boolean ignoreKey = ignoreKeyTopics.contains(sinkRecord.topic()) || this.ignoreKey;
       final boolean ignoreSchema =
           ignoreSchemaTopics.contains(sinkRecord.topic()) || this.ignoreSchema;
+      String recordId = null;
 
+      try {
+                if (sinkRecord != null) {
+                    recordId = sinkRecord.key().toString();
+                }
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode sinkKeyObj = mapper.readTree(sinkRecord.key().toString());
+        index = sinkKeyObj.has(keyObjIndexName)
+                ? sinkKeyObj.get(keyObjIndexName).textValue() : index;
+        recordId = sinkKeyObj.has(keyObjId) ? sinkKeyObj.get(keyObjId).textValue() : recordId;
+      } catch (Exception e) {
+        // N/A --> Key Record can be a String or JSON format
+      }
+
+      log.info("Index --> " + index);
+      log.info("Record Id --> " + recordId);
+      log.info("Arrived new Elasticsearch record with uuid: " + recordId);
       if (!ignoreSchema && !existingMappings.contains(index)) {
         try {
           if (Mapping.getMapping(client, index, type) == null) {
@@ -267,7 +289,7 @@ public class ElasticsearchWriter {
         existingMappings.add(index);
       }
 
-      tryWriteRecord(sinkRecord, index, ignoreKey, ignoreSchema);
+      tryWriteRecord(sinkRecord, index, recordId, ignoreKey, ignoreSchema);
     }
   }
 
@@ -278,12 +300,14 @@ public class ElasticsearchWriter {
   private void tryWriteRecord(
       SinkRecord sinkRecord,
       String index,
+      String recordId,
       boolean ignoreKey,
       boolean ignoreSchema) {
 
     try {
       IndexableRecord record = converter.convertRecord(
           sinkRecord,
+          recordId,
           index,
           type,
           ignoreKey,

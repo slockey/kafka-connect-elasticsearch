@@ -16,19 +16,14 @@
 
 package io.confluent.connect.elasticsearch.bulk;
 
-import io.confluent.connect.elasticsearch.ElasticsearchSinkConnectorConfig;
-import io.confluent.connect.elasticsearch.RetryUtil;
-import org.apache.kafka.common.config.ConfigDef;
-import org.apache.kafka.common.utils.Time;
-import org.apache.kafka.connect.errors.ConnectException;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
+import java.text.SimpleDateFormat;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.Deque;
 import java.util.List;
 import java.util.Locale;
+import java.util.TimeZone;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -38,6 +33,15 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+
+import org.apache.kafka.common.config.ConfigDef;
+import org.apache.kafka.common.utils.Time;
+import org.apache.kafka.connect.errors.ConnectException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import io.confluent.connect.elasticsearch.ElasticsearchSinkConnectorConfig;
+import io.confluent.connect.elasticsearch.RetryUtil;
 
 /**
  * @param <R> record type
@@ -127,14 +131,16 @@ public class BulkProcessor<R, B> {
       @Override
       public void run() {
         log.debug("Starting farmer task");
+        log.info("Starting farmer task at " + (new Date(System.currentTimeMillis())) + " (EST)");
         try {
           while (!stopRequested) {
-            submitBatchWhenReady();
+              submitBatchWhenReady();
           }
         } catch (InterruptedException e) {
           throw new ConnectException(e);
         }
         log.debug("Finished farmer task");
+        log.info("Finished farmer task");
       }
     };
   }
@@ -291,7 +297,6 @@ public class BulkProcessor<R, B> {
         throw new ConnectException("Add timeout expired before buffer availability");
       }
     }
-
     unsentRecords.addLast(record);
     notifyAll();
   }
@@ -370,7 +375,7 @@ public class BulkProcessor<R, B> {
         try {
           log.trace("Executing batch {} of {} records with attempt {}/{}",
                   batchId, batch.size(), attempts, maxAttempts);
-          final BulkResponse bulkRsp = bulkClient.execute(bulkReq);
+          final BulkResponse bulkRsp = bulkClient.execute(bulkReq, batch);
           if (bulkRsp.isSucceeded()) {
             if (attempts > 1) {
               // We only logged failures, so log the success immediately after a failure ...

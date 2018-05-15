@@ -23,7 +23,11 @@ import io.confluent.connect.elasticsearch.bulk.BulkResponse;
 import java.io.IOException;
 import java.util.List;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 public class BulkIndexingClient implements BulkClient<IndexableRecord, BulkRequest> {
+  private static final Logger log = LoggerFactory.getLogger(BulkIndexingClient.class);
 
   private final ElasticsearchClient client;
 
@@ -37,8 +41,17 @@ public class BulkIndexingClient implements BulkClient<IndexableRecord, BulkReque
   }
 
   @Override
-  public BulkResponse execute(BulkRequest bulk) throws IOException {
-    return client.executeBulk(bulk);
+  public BulkResponse execute(BulkRequest bulk, List<IndexableRecord> batch) throws IOException {
+    BulkResponse result = client.executeBulk(bulk);
+    if (result.isSucceeded()) {
+      for (int i = 0; i < batch.size(); i++) {
+        IndexableRecord r = (IndexableRecord) batch.get(0);
+        log.info("Written into ES: " + r.key);
+      }
+      return result;
+    }
+    return BulkResponse.failure(false, "unknown error");
   }
+
 
 }

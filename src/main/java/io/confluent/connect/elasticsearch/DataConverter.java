@@ -108,6 +108,7 @@ public class DataConverter {
 
   public IndexableRecord convertRecord(
       SinkRecord record,
+      String recordId,
       String index,
       String type,
       boolean ignoreKey,
@@ -158,7 +159,7 @@ public class DataConverter {
            + "+" + String.valueOf((int) record.kafkaPartition())
            + "+" + String.valueOf(record.kafkaOffset());
     } else {
-      id = convertKey(record.keySchema(), record.key());
+      id = convertKey(record.keySchema(), recordId);
     }
 
     final String payload = getPayload(record, ignoreSchema);

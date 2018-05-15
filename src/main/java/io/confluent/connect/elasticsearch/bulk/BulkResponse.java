@@ -16,6 +16,10 @@
 
 package io.confluent.connect.elasticsearch.bulk;
 
+import java.util.List;
+
+import io.confluent.connect.elasticsearch.IndexableRecord;
+
 public class BulkResponse {
 
   private static final BulkResponse SUCCESS_RESPONSE = new BulkResponse(true, false, "");
@@ -23,6 +27,7 @@ public class BulkResponse {
   public final boolean succeeded;
   public final boolean retriable;
   public final String errorInfo;
+  public List<IndexableRecord> succeededBatch;
 
   private BulkResponse(boolean succeeded, boolean retriable, String errorInfo) {
     this.succeeded = succeeded;
@@ -48,6 +53,14 @@ public class BulkResponse {
 
   public String getErrorInfo() {
     return errorInfo;
+  }
+
+  public List<IndexableRecord> getSucceededBatch() {
+    return succeededBatch;
+  }
+
+  public void setSucceededBatch(List<IndexableRecord> succeededBatch) {
+    this.succeededBatch = succeededBatch;
   }
 
 }

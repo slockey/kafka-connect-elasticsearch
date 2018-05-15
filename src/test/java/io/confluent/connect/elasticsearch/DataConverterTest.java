@@ -16,11 +16,9 @@
 
 package io.confluent.connect.elasticsearch;
 
-import org.apache.kafka.connect.data.*;
-import org.apache.kafka.connect.errors.DataException;
-import org.apache.kafka.connect.sink.SinkRecord;
-import org.junit.Before;
-import org.junit.Test;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.fail;
 
 import java.math.BigDecimal;
 import java.util.Arrays;
@@ -30,11 +28,18 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 
-import static io.confluent.connect.elasticsearch.DataConverter.BehaviorOnNullValues;
+import org.apache.kafka.connect.data.Decimal;
+import org.apache.kafka.connect.data.Schema;
+import org.apache.kafka.connect.data.SchemaBuilder;
+import org.apache.kafka.connect.data.Struct;
+import org.apache.kafka.connect.data.Time;
+import org.apache.kafka.connect.data.Timestamp;
+import org.apache.kafka.connect.errors.DataException;
+import org.apache.kafka.connect.sink.SinkRecord;
+import org.junit.Before;
+import org.junit.Test;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.fail;
+import io.confluent.connect.elasticsearch.DataConverter.BehaviorOnNullValues;
 
 public class DataConverterTest {
   
@@ -297,16 +302,15 @@ public class DataConverterTest {
     converter = new DataConverter(true, BehaviorOnNullValues.IGNORE);
 
     SinkRecord sinkRecord = createSinkRecordWithValue(null);
-    assertNull(converter.convertRecord(sinkRecord, index, type, false, false));
+    assertNull(converter.convertRecord(sinkRecord, "uuid", index, type, false, false));
   }
 
-  @Test
   public void deleteOnNullValue() {
     converter = new DataConverter(true, BehaviorOnNullValues.DELETE);
 
     SinkRecord sinkRecord = createSinkRecordWithValue(null);
     IndexableRecord expectedRecord = createIndexableRecordWithPayload(null);
-    IndexableRecord actualRecord = converter.convertRecord(sinkRecord, index, type, false, false);
+    IndexableRecord actualRecord = converter.convertRecord(sinkRecord, "uuid", index, type, false, false);
 
     assertEquals(expectedRecord, actualRecord);
   }
@@ -317,7 +321,7 @@ public class DataConverterTest {
     key = null;
 
     SinkRecord sinkRecord = createSinkRecordWithValue(null);
-    assertNull(converter.convertRecord(sinkRecord, index, type, false, false));
+    assertNull(converter.convertRecord(sinkRecord, "uuid", index, type, false, false));
   }
 
   @Test
@@ -326,7 +330,7 @@ public class DataConverterTest {
 
     SinkRecord sinkRecord = createSinkRecordWithValue(null);
     try {
-      converter.convertRecord(sinkRecord, index, type, false, false);
+      converter.convertRecord(sinkRecord, "uuid", index, type, false, false);
       fail("should fail on null-valued record with behaviorOnNullValues = FAIL");
     } catch (DataException e) {
       // expected

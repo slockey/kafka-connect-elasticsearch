@@ -70,17 +70,18 @@ public class BulkProcessorTest {
     }
 
     @Override
-    public BulkResponse execute(List<Integer> request) throws IOException {
-      final Expectation expectation;
-      try {
-        expectation = expectQ.remove();
-        assertEquals(expectation.request, request);
-      } catch (Throwable t) {
-        executeMetExpectations = false;
-        throw t;
-      }
-      executeMetExpectations &= true;
-      return expectation.response;
+    public BulkResponse execute(List<Integer> req, List<Integer> batch)
+            throws IOException {
+        final Expectation expectation;
+        try {
+            expectation = expectQ.remove();
+            assertEquals(expectation.request, req);
+          } catch (Throwable t) {
+            executeMetExpectations = false;
+            throw t;
+          }
+          executeMetExpectations &= true;
+          return expectation.response;
     }
   }
 
