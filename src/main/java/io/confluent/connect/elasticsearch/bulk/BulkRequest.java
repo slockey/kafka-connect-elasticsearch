@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Confluent Inc.
+ * Copyright 2018 Confluent Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,13 +16,15 @@
 
 package io.confluent.connect.elasticsearch.bulk;
 
-import java.io.IOException;
+
 import java.util.List;
 
-public interface BulkClient<R, B> {
-
-  B bulkRequest(List<R> batch);
-
-  BulkResponse execute(B req, List<R> batch) throws IOException;
-
+/**
+ * BulkRequest is a marker interface for use with
+ * {@link io.confluent.connect.elasticsearch.ElasticsearchClient#createBulkRequest(List)} and
+ * {@link io.confluent.connect.elasticsearch.ElasticsearchClient#executeBulk(BulkRequest)}.
+ * Implementations will typically hold state comprised of instances of classes that are
+ * specific to the client library.
+ */
+public interface BulkRequest {
 }

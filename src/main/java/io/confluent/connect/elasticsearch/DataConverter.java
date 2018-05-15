@@ -16,6 +16,7 @@
 
 package io.confluent.connect.elasticsearch;
 
+import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.connect.data.ConnectSchema;
 import org.apache.kafka.connect.data.Date;
 import org.apache.kafka.connect.data.Decimal;
@@ -38,7 +39,9 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 
 import static io.confluent.connect.elasticsearch.ElasticsearchSinkConnectorConstants.MAP_KEY;
 import static io.confluent.connect.elasticsearch.ElasticsearchSinkConnectorConstants.MAP_VALUE;
@@ -52,7 +55,27 @@ public class DataConverter {
     JSON_CONVERTER.configure(Collections.singletonMap("schemas.enable", "false"), false);
   }
 
-  private static String convertKey(Schema keySchema, Object key) {
+  private final boolean useCompactMapEntries;
+  private final BehaviorOnNullValues behaviorOnNullValues;
+
+  /**
+   * Create a DataConverter, specifying how map entries with string keys within record
+   * values should be written to JSON. Compact map entries are written as
+   * <code>"entryKey": "entryValue"</code>, while the non-compact form are written as a nested
+   * document such as <code>{"key": "entryKey", "value": "entryValue"}</code>. All map entries
+   * with non-string keys are always written as nested documents.
+   *
+   * @param useCompactMapEntries true for compact map entries with string keys, or false for
+   *                             the nested document form.
+   * @param behaviorOnNullValues behavior for handling records with null values; may not be null
+   */
+  public DataConverter(boolean useCompactMapEntries, BehaviorOnNullValues behaviorOnNullValues) {
+    this.useCompactMapEntries = useCompactMapEntries;
+    this.behaviorOnNullValues =
+        Objects.requireNonNull(behaviorOnNullValues, "behaviorOnNullValues cannot be null.");
+  }
+
+  private String convertKey(Schema keySchema, Object key) {
     if (key == null) {
       throw new ConnectException("Key is used as document id and can not be null.");
     }
@@ -83,36 +106,82 @@ public class DataConverter {
     }
   }
 
-  public static IndexableRecord convertRecord(
+  public IndexableRecord convertRecord(
       SinkRecord record,
+      String recordId,
       String index,
       String type,
       boolean ignoreKey,
       boolean ignoreSchema
   ) {
+    if (record.value() == null) {
+      switch (behaviorOnNullValues) {
+        case IGNORE:
+          return null;
+        case DELETE:
+          if (record.key() == null) {
+            // Since the record key is used as the ID of the index to delete and we don't have a key
+            // for this record, we can't delete anything anyways, so we ignore the record.
+            // We can also disregard the value of the ignoreKey parameter, since even if it's true
+            // the resulting index we'd try to delete would be based solely off topic/partition/
+            // offset information for the SinkRecord. Since that information is guaranteed to be
+            // unique per message, we can be confident that there wouldn't be any corresponding
+            // index present in ES to delete anyways.
+            return null;
+          }
+          // Will proceed as normal, ultimately creating an IndexableRecord with a null payload
+          break;
+        case FAIL:
+          throw new DataException(String.format(
+              "Sink record with key of %s and null value encountered for topic/partition/offset "
+              + "%s/%s/%s (to ignore future records like this change the configuration property "
+              + "'%s' from '%s' to '%s')",
+              record.key(),
+              record.topic(),
+              record.kafkaPartition(),
+              record.kafkaOffset(),
+              ElasticsearchSinkConnectorConfig.BEHAVIOR_ON_NULL_VALUES_CONFIG,
+              BehaviorOnNullValues.FAIL,
+              BehaviorOnNullValues.IGNORE
+          ));
+        default:
+          throw new RuntimeException(String.format(
+              "Unknown value for %s enum: %s",
+              BehaviorOnNullValues.class.getSimpleName(),
+              behaviorOnNullValues
+          ));
+      }
+    }
+
     final String id;
     if (ignoreKey) {
       id = record.topic()
            + "+" + String.valueOf((int) record.kafkaPartition())
            + "+" + String.valueOf(record.kafkaOffset());
     } else {
-      id = DataConverter.convertKey(record.keySchema(), record.key());
+      id = convertKey(record.keySchema(), recordId);
     }
 
-    final Schema schema;
-    final Object value;
-    if (!ignoreSchema) {
-      schema = preProcessSchema(record.valueSchema());
-      value = preProcessValue(record.value(), record.valueSchema(), schema);
-    } else {
-      schema = record.valueSchema();
-      value = record.value();
-    }
-
-    byte[] rawJsonPayload = JSON_CONVERTER.fromConnectData(record.topic(), schema, value);
-    final String payload = new String(rawJsonPayload, StandardCharsets.UTF_8);
+    final String payload = getPayload(record, ignoreSchema);
     final Long version = ignoreKey ? null : record.kafkaOffset();
     return new IndexableRecord(new Key(index, type, id), payload, version);
+  }
+
+  private String getPayload(SinkRecord record, boolean ignoreSchema) {
+    if (record.value() == null) {
+      return null;
+    }
+
+    Schema schema = ignoreSchema
+        ? record.valueSchema()
+        : preProcessSchema(record.valueSchema());
+
+    Object value = ignoreSchema
+        ? record.value()
+        : preProcessValue(record.value(), record.valueSchema(), schema);
+
+    byte[] rawJsonPayload = JSON_CONVERTER.fromConnectData(record.topic(), schema, value);
+    return new String(rawJsonPayload, StandardCharsets.UTF_8);
   }
 
   // We need to pre process the Kafka Connect schema before converting to JSON as Elasticsearch
@@ -120,7 +189,8 @@ public class DataConverter {
   // completely rewrite a converter for Elasticsearch, we will refactor the JSON converter to
   // support customized translation. The pre process is no longer needed once we have the JSON
   // converter refactored.
-  static Schema preProcessSchema(Schema schema) {
+  // visible for testing
+  Schema preProcessSchema(Schema schema) {
     if (schema == null) {
       return null;
     }
@@ -153,20 +223,21 @@ public class DataConverter {
     }
   }
 
-  private static Schema preProcessArraySchema(Schema schema) {
+  private Schema preProcessArraySchema(Schema schema) {
     Schema valSchema = preProcessSchema(schema.valueSchema());
     return copySchemaBasics(schema, SchemaBuilder.array(valSchema)).build();
   }
 
-  private static Schema preProcessMapSchema(Schema schema) {
+  private Schema preProcessMapSchema(Schema schema) {
     Schema keySchema = schema.keySchema();
     Schema valueSchema = schema.valueSchema();
     String keyName = keySchema.name() == null ? keySchema.type().name() : keySchema.name();
     String valueName = valueSchema.name() == null ? valueSchema.type().name() : valueSchema.name();
     Schema preprocessedKeySchema = preProcessSchema(keySchema);
     Schema preprocessedValueSchema = preProcessSchema(valueSchema);
-    if (keySchema.type() == Schema.Type.STRING) {
-      return SchemaBuilder.map(preprocessedKeySchema, preprocessedValueSchema).build();
+    if (useCompactMapEntries && keySchema.type() == Schema.Type.STRING) {
+      SchemaBuilder result = SchemaBuilder.map(preprocessedKeySchema, preprocessedValueSchema);
+      return copySchemaBasics(schema, result).build();
     }
     Schema elementSchema = SchemaBuilder.struct().name(keyName + "-" + valueName)
         .field(MAP_KEY, preprocessedKeySchema)
@@ -175,7 +246,7 @@ public class DataConverter {
     return copySchemaBasics(schema, SchemaBuilder.array(elementSchema)).build();
   }
 
-  private static Schema preProcessStructSchema(Schema schema) {
+  private Schema preProcessStructSchema(Schema schema) {
     SchemaBuilder builder = copySchemaBasics(schema, SchemaBuilder.struct().name(schema.name()));
     for (Field field : schema.fields()) {
       builder.field(field.name(), preProcessSchema(field.schema()));
@@ -183,7 +254,7 @@ public class DataConverter {
     return builder.build();
   }
 
-  private static SchemaBuilder copySchemaBasics(Schema source, SchemaBuilder target) {
+  private SchemaBuilder copySchemaBasics(Schema source, SchemaBuilder target) {
     if (source.isOptional()) {
       target.optional();
     }
@@ -195,16 +266,14 @@ public class DataConverter {
   }
 
   // visible for testing
-  static Object preProcessValue(Object value, Schema schema, Schema newSchema) {
+  Object preProcessValue(Object value, Schema schema, Schema newSchema) {
     // Handle missing schemas and acceptable null values
     if (schema == null) {
       return value;
     }
+
     if (value == null) {
-      Object result = preProcessNullValue(schema);
-      if (result != null) {
-        return result;
-      }
+      return preProcessNullValue(schema);
     }
 
     // Handle logical types
@@ -229,7 +298,7 @@ public class DataConverter {
     }
   }
 
-  private static Object preProcessNullValue(Schema schema) {
+  private Object preProcessNullValue(Schema schema) {
     if (schema.defaultValue() != null) {
       return schema.defaultValue();
     }
@@ -240,7 +309,7 @@ public class DataConverter {
   }
 
   // @returns the decoded logical value or null if this isn't a known logical type
-  private static Object preProcessLogicalValue(String schemaName, Object value) {
+  private Object preProcessLogicalValue(String schemaName, Object value) {
     switch (schemaName) {
       case Decimal.LOGICAL_NAME:
         return ((BigDecimal) value).doubleValue();
@@ -254,7 +323,7 @@ public class DataConverter {
     }
   }
 
-  private static Object preProcessArrayValue(Object value, Schema schema, Schema newSchema) {
+  private Object preProcessArrayValue(Object value, Schema schema, Schema newSchema) {
     Collection collection = (Collection) value;
     List<Object> result = new ArrayList<>();
     for (Object element: collection) {
@@ -263,12 +332,12 @@ public class DataConverter {
     return result;
   }
 
-  private static Object preProcessMapValue(Object value, Schema schema, Schema newSchema) {
+  private Object preProcessMapValue(Object value, Schema schema, Schema newSchema) {
     Schema keySchema = schema.keySchema();
     Schema valueSchema = schema.valueSchema();
     Schema newValueSchema = newSchema.valueSchema();
     Map<?, ?> map = (Map<?, ?>) value;
-    if (keySchema.type() == Schema.Type.STRING) {
+    if (useCompactMapEntries && keySchema.type() == Schema.Type.STRING) {
       Map<Object, Object> processedMap = new HashMap<>();
       for (Map.Entry<?, ?> entry: map.entrySet()) {
         processedMap.put(
@@ -290,7 +359,7 @@ public class DataConverter {
     return mapStructs;
   }
 
-  private static Object preProcessStructValue(Object value, Schema schema, Schema newSchema) {
+  private Object preProcessStructValue(Object value, Schema schema, Schema newSchema) {
     Struct struct = (Struct) value;
     Struct newStruct = new Struct(newSchema);
     for (Field field : schema.fields()) {
@@ -299,5 +368,53 @@ public class DataConverter {
       newStruct.put(field.name(), converted);
     }
     return newStruct;
+  }
+
+  public enum BehaviorOnNullValues {
+    IGNORE,
+    DELETE,
+    FAIL;
+
+    public static final BehaviorOnNullValues DEFAULT = IGNORE;
+
+    // Want values for "behavior.on.null.values" property to be case-insensitive
+    public static final ConfigDef.Validator VALIDATOR = new ConfigDef.Validator() {
+      private final ConfigDef.ValidString validator = ConfigDef.ValidString.in(names());
+
+      @Override
+      public void ensureValid(String name, Object value) {
+        if (value instanceof String) {
+          value = ((String) value).toLowerCase(Locale.ROOT);
+        }
+        validator.ensureValid(name, value);
+      }
+
+      // Overridden here so that ConfigDef.toEnrichedRst shows possible values correctly
+      @Override
+      public String toString() {
+        return validator.toString();
+      }
+
+    };
+
+    public static String[] names() {
+      BehaviorOnNullValues[] behaviors = values();
+      String[] result = new String[behaviors.length];
+
+      for (int i = 0; i < behaviors.length; i++) {
+        result[i] = behaviors[i].toString();
+      }
+
+      return result;
+    }
+
+    public static BehaviorOnNullValues forValue(String value) {
+      return valueOf(value.toUpperCase(Locale.ROOT));
+    }
+
+    @Override
+    public String toString() {
+      return name().toLowerCase(Locale.ROOT);
+    }
   }
 }

@@ -16,7 +16,7 @@
 
 package io.confluent.connect.elasticsearch;
 
-import io.searchbox.core.Index;
+import java.util.Objects;
 
 public class IndexableRecord {
 
@@ -30,15 +30,22 @@ public class IndexableRecord {
     this.payload = payload;
   }
 
-  public Index toIndexRequest() {
-    Index.Builder req = new Index.Builder(payload)
-        .index(key.index)
-        .type(key.type)
-        .id(key.id);
-    if (version != null) {
-      req.setParameter("version_type", "external").setParameter("version", version);
+  @Override
+  public boolean equals(Object o) {
+    if (this == o) {
+      return true;
     }
-    return req.build();
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
+    IndexableRecord that = (IndexableRecord) o;
+    return Objects.equals(key, that.key)
+        && Objects.equals(payload, that.payload)
+        && Objects.equals(version, that.version);
   }
 
+  @Override
+  public int hashCode() {
+    return Objects.hash(key, version, payload);
+  }
 }

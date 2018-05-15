@@ -29,6 +29,8 @@ import org.elasticsearch.test.ESIntegTestCase;
 import org.elasticsearch.test.InternalTestCluster;
 import org.junit.Test;
 
+import static io.confluent.connect.elasticsearch.DataConverter.BehaviorOnNullValues;
+
 public class MappingTest extends ElasticsearchSinkTestBase {
 
   private static final String INDEX = "kafka-connect";
@@ -109,13 +111,14 @@ public class MappingTest extends ElasticsearchSinkTestBase {
       }
     }
 
+    DataConverter converter = new DataConverter(true, BehaviorOnNullValues.IGNORE);
     Schema.Type schemaType = schema.type();
     switch (schemaType) {
       case ARRAY:
         verifyMapping(schema.valueSchema(), mapping);
         break;
       case MAP:
-        Schema newSchema = DataConverter.preProcessSchema(schema);
+        Schema newSchema = converter.preProcessSchema(schema);
         JsonObject mapProperties = mapping.get("properties").getAsJsonObject();
         verifyMapping(newSchema.keySchema(), mapProperties.get(ElasticsearchSinkConnectorConstants.MAP_KEY).getAsJsonObject());
         verifyMapping(newSchema.valueSchema(), mapProperties.get(ElasticsearchSinkConnectorConstants.MAP_VALUE).getAsJsonObject());
@@ -127,7 +130,7 @@ public class MappingTest extends ElasticsearchSinkTestBase {
         }
         break;
       default:
-        assertEquals("\"" + ElasticsearchSinkConnectorConstants.TYPES.get(schemaType) + "\"", type.toString());
+        assertEquals("\"" + Mapping.getElasticsearchType(client, schemaType) + "\"", type.toString());
     }
   }
 }

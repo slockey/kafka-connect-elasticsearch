@@ -16,6 +16,8 @@
 
 package io.confluent.connect.elasticsearch;
 
+import io.confluent.connect.elasticsearch.bulk.BulkProcessor;
+import io.confluent.connect.elasticsearch.jest.JestElasticsearchClient;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.config.ConfigException;
@@ -33,15 +35,11 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
-import io.searchbox.client.JestClient;
-import io.searchbox.client.JestClientFactory;
-import io.searchbox.client.config.HttpClientConfig;
-
 public class ElasticsearchSinkTask extends SinkTask {
 
   private static final Logger log = LoggerFactory.getLogger(ElasticsearchSinkTask.class);
   private ElasticsearchWriter writer;
-  private JestClient client;
+  private ElasticsearchClient client;
 
   @Override
   public String version() {
@@ -54,7 +52,7 @@ public class ElasticsearchSinkTask extends SinkTask {
   }
 
   // public for testing
-  public void start(Map<String, String> props, JestClient client) {
+  public void start(Map<String, String> props, ElasticsearchClient client) {
     try {
       log.info("Starting ElasticsearchSinkTask.");
 
@@ -64,6 +62,8 @@ public class ElasticsearchSinkTask extends SinkTask {
           config.getBoolean(ElasticsearchSinkConnectorConfig.KEY_IGNORE_CONFIG);
       boolean ignoreSchema =
           config.getBoolean(ElasticsearchSinkConnectorConfig.SCHEMA_IGNORE_CONFIG);
+      boolean useCompactMapEntries =
+          config.getBoolean(ElasticsearchSinkConnectorConfig.COMPACT_MAP_ENTRIES_CONFIG);
 
 
       Map<String, String> topicToIndexMap =
@@ -91,35 +91,39 @@ public class ElasticsearchSinkTask extends SinkTask {
       boolean dropInvalidMessage =
           config.getBoolean(ElasticsearchSinkConnectorConfig.DROP_INVALID_MESSAGE_CONFIG);
 
+      DataConverter.BehaviorOnNullValues behaviorOnNullValues =
+          DataConverter.BehaviorOnNullValues.forValue(
+              config.getString(ElasticsearchSinkConnectorConfig.BEHAVIOR_ON_NULL_VALUES_CONFIG)
+          );
+
+      BulkProcessor.BehaviorOnMalformedDoc behaviorOnMalformedDoc =
+          BulkProcessor.BehaviorOnMalformedDoc.forValue(
+              config.getString(ElasticsearchSinkConnectorConfig.BEHAVIOR_ON_MALFORMED_DOCS_CONFIG)
+          );
+
       // Calculate the maximum possible backoff time ...
-      long maxRetryBackoffMs = RetryUtil.computeRetryWaitTimeInMillis(maxRetry, retryBackoffMs);
+      long maxRetryBackoffMs =
+          RetryUtil.computeRetryWaitTimeInMillis(maxRetry, retryBackoffMs);
       if (maxRetryBackoffMs > RetryUtil.MAX_RETRY_TIME_MS) {
         log.warn("This connector uses exponential backoff with jitter for retries, "
                 + "and using '{}={}' and '{}={}' results in an impractical but possible maximum "
                 + "backoff time greater than {} hours.",
-                ElasticsearchSinkConnectorConfig.MAX_RETRIES_CONFIG, maxRetry,
-                ElasticsearchSinkConnectorConfig.RETRY_BACKOFF_MS_CONFIG, retryBackoffMs,
-                TimeUnit.MILLISECONDS.toHours(maxRetryBackoffMs));
+            ElasticsearchSinkConnectorConfig.MAX_RETRIES_CONFIG, maxRetry,
+            ElasticsearchSinkConnectorConfig.RETRY_BACKOFF_MS_CONFIG, retryBackoffMs,
+            TimeUnit.MILLISECONDS.toHours(maxRetryBackoffMs));
       }
 
       if (client != null) {
         this.client = client;
       } else {
-        List<String> address =
-            config.getList(ElasticsearchSinkConnectorConfig.CONNECTION_URL_CONFIG);
-        JestClientFactory factory = new JestClientFactory();
-        factory.setHttpClientConfig(
-            new HttpClientConfig.Builder(address)
-                .multiThreaded(true)
-                .build()
-        );
-        this.client = factory.getObject();
+        this.client = new JestElasticsearchClient(props);
       }
 
       ElasticsearchWriter.Builder builder = new ElasticsearchWriter.Builder(this.client)
           .setType(type)
           .setIgnoreKey(ignoreKey, topicIgnoreKey)
           .setIgnoreSchema(ignoreSchema, topicIgnoreSchema)
+          .setCompactMapEntries(useCompactMapEntries)
           .setTopicToIndexMap(topicToIndexMap)
           .setFlushTimoutMs(flushTimeoutMs)
           .setMaxBufferedRecords(maxBufferedRecords)
@@ -128,7 +132,9 @@ public class ElasticsearchSinkTask extends SinkTask {
           .setLingerMs(lingerMs)
           .setRetryBackoffMs(retryBackoffMs)
           .setMaxRetry(maxRetry)
-          .setDropInvalidMessage(dropInvalidMessage);
+          .setDropInvalidMessage(dropInvalidMessage)
+          .setBehaviorOnNullValues(behaviorOnNullValues)
+          .setBehaviorOnMalformedDoc(behaviorOnMalformedDoc);
 
       writer = builder.build();
       writer.start();
@@ -174,13 +180,13 @@ public class ElasticsearchSinkTask extends SinkTask {
       writer.stop();
     }
     if (client != null) {
-      client.shutdownClient();
+      client.close();
     }
   }
 
   private Map<String, String> parseMapConfig(List<String> values) {
     Map<String, String> map = new HashMap<>();
-    for (String value: values) {
+    for (String value : values) {
       String[] parts = value.split(":");
       String topic = parts[0];
       String type = parts[1];

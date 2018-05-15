@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Confluent Inc.
+ * Copyright 2018 Confluent Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -14,15 +14,20 @@
  * the License.
  **/
 
-package io.confluent.connect.elasticsearch.bulk;
+package io.confluent.connect.elasticsearch.jest;
 
-import java.io.IOException;
-import java.util.List;
+import io.confluent.connect.elasticsearch.bulk.BulkRequest;
+import io.searchbox.core.Bulk;
 
-public interface BulkClient<R, B> {
+public class JestBulkRequest implements BulkRequest {
 
-  B bulkRequest(List<R> batch);
+  private final Bulk bulk;
 
-  BulkResponse execute(B req, List<R> batch) throws IOException;
+  public JestBulkRequest(Bulk bulk) {
+    this.bulk = bulk;
+  }
 
+  public Bulk getBulk() {
+    return bulk;
+  }
 }

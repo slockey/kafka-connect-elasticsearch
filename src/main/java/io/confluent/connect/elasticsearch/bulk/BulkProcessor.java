@@ -16,16 +16,14 @@
 
 package io.confluent.connect.elasticsearch.bulk;
 
-import io.confluent.connect.elasticsearch.RetryUtil;
-import org.apache.kafka.common.utils.Time;
-import org.apache.kafka.connect.errors.ConnectException;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
+import java.text.SimpleDateFormat;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.Deque;
 import java.util.List;
+import java.util.Locale;
+import java.util.TimeZone;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -35,6 +33,15 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+
+import org.apache.kafka.common.config.ConfigDef;
+import org.apache.kafka.common.utils.Time;
+import org.apache.kafka.connect.errors.ConnectException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import io.confluent.connect.elasticsearch.ElasticsearchSinkConnectorConfig;
+import io.confluent.connect.elasticsearch.RetryUtil;
 
 /**
  * @param <R> record type
@@ -53,6 +60,7 @@ public class BulkProcessor<R, B> {
   private final long lingerMs;
   private final int maxRetries;
   private final long retryBackoffMs;
+  private final BehaviorOnMalformedDoc behaviorOnMalformedDoc;
 
   private final Thread farmer;
   private final ExecutorService executor;
@@ -76,7 +84,8 @@ public class BulkProcessor<R, B> {
       int batchSize,
       long lingerMs,
       int maxRetries,
-      long retryBackoffMs
+      long retryBackoffMs,
+      BehaviorOnMalformedDoc behaviorOnMalformedDoc
   ) {
     this.time = time;
     this.bulkClient = bulkClient;
@@ -85,6 +94,7 @@ public class BulkProcessor<R, B> {
     this.lingerMs = lingerMs;
     this.maxRetries = maxRetries;
     this.retryBackoffMs = retryBackoffMs;
+    this.behaviorOnMalformedDoc = behaviorOnMalformedDoc;
 
     unsentRecords = new ArrayDeque<>(maxBufferedRecords);
 
@@ -121,14 +131,16 @@ public class BulkProcessor<R, B> {
       @Override
       public void run() {
         log.debug("Starting farmer task");
+        log.info("Starting farmer task at " + (new Date(System.currentTimeMillis())) + " (EST)");
         try {
           while (!stopRequested) {
-            submitBatchWhenReady();
+              submitBatchWhenReady();
           }
         } catch (InterruptedException e) {
           throw new ConnectException(e);
         }
         log.debug("Finished farmer task");
+        log.info("Finished farmer task");
       }
     };
   }
@@ -285,7 +297,6 @@ public class BulkProcessor<R, B> {
         throw new ConnectException("Add timeout expired before buffer availability");
       }
     }
-
     unsentRecords.addLast(record);
     notifyAll();
   }
@@ -364,7 +375,7 @@ public class BulkProcessor<R, B> {
         try {
           log.trace("Executing batch {} of {} records with attempt {}/{}",
                   batchId, batch.size(), attempts, maxAttempts);
-          final BulkResponse bulkRsp = bulkClient.execute(bulkReq);
+          final BulkResponse bulkRsp = bulkClient.execute(bulkReq, batch);
           if (bulkRsp.isSucceeded()) {
             if (attempts > 1) {
               // We only logged failures, so log the success immediately after a failure ...
@@ -372,9 +383,15 @@ public class BulkProcessor<R, B> {
                       batchId, batch.size(), attempts, maxAttempts);
             }
             return bulkRsp;
+          } else if (responseContainsMalformedDocError(bulkRsp)) {
+            retriable = bulkRsp.isRetriable();
+            handleMalformedDoc(bulkRsp);
+            return bulkRsp;
+          } else {
+            // for all other errors, throw the error up
+            retriable = bulkRsp.isRetriable();
+            throw new ConnectException("Bulk request failed: " + bulkRsp.getErrorInfo());
           }
-          retriable = bulkRsp.isRetriable();
-          throw new ConnectException("Bulk request failed: " + bulkRsp.getErrorInfo());
         } catch (Exception e) {
           if (retriable && attempts < maxAttempts) {
             long sleepTimeMs = RetryUtil.computeRandomRetryWaitTimeInMillis(retryAttempts,
@@ -391,6 +408,43 @@ public class BulkProcessor<R, B> {
         }
       }
     }
+
+    private void handleMalformedDoc(BulkResponse bulkRsp) {
+      // if the elasticsearch request failed because of a malformed document,
+      // the behavior is configurable.
+      switch (behaviorOnMalformedDoc) {
+        case IGNORE:
+          log.debug("Encountered an illegal document error when executing batch {} of {}"
+                  + " records. Ignoring and will not index record. Error was {}",
+              batchId, batch.size(), bulkRsp.getErrorInfo());
+          return;
+        case WARN:
+          log.warn("Encountered an illegal document error when executing batch {} of {}"
+                  + " records. Ignoring and will not index record. Error was {}",
+              batchId, batch.size(), bulkRsp.getErrorInfo());
+          return;
+        case FAIL:
+          log.error("Encountered an illegal document error when executing batch {} of {}"
+                  + " records. Error was {} (to ignore future records like this"
+                  + " change the configuration property '%s' from '%s' to '%s').",
+              batchId, batch.size(), bulkRsp.getErrorInfo(),
+              ElasticsearchSinkConnectorConfig.BEHAVIOR_ON_MALFORMED_DOCS_CONFIG,
+              BehaviorOnMalformedDoc.FAIL,
+              BehaviorOnMalformedDoc.IGNORE);
+          throw new ConnectException("Bulk request failed: " + bulkRsp.getErrorInfo());
+        default:
+          throw new RuntimeException(String.format(
+              "Unknown value for %s enum: %s",
+              BehaviorOnMalformedDoc.class.getSimpleName(),
+              behaviorOnMalformedDoc
+          ));
+      }
+    }
+  }
+
+  private boolean responseContainsMalformedDocError(BulkResponse bulkRsp) {
+    return bulkRsp.getErrorInfo().contains("mapper_parsing_exception")
+        || bulkRsp.getErrorInfo().contains("illegal_argument_exception");
   }
 
   private synchronized void onBatchCompletion(int batchSize) {
@@ -419,4 +473,51 @@ public class BulkProcessor<R, B> {
     }
   }
 
+  public enum BehaviorOnMalformedDoc {
+    IGNORE,
+    WARN,
+    FAIL;
+
+    public static final BehaviorOnMalformedDoc DEFAULT = FAIL;
+
+    // Want values for "behavior.on.malformed.doc" property to be case-insensitive
+    public static final ConfigDef.Validator VALIDATOR = new ConfigDef.Validator() {
+      private final ConfigDef.ValidString validator = ConfigDef.ValidString.in(names());
+
+      @Override
+      public void ensureValid(String name, Object value) {
+        if (value instanceof String) {
+          value = ((String) value).toLowerCase(Locale.ROOT);
+        }
+        validator.ensureValid(name, value);
+      }
+
+      // Overridden here so that ConfigDef.toEnrichedRst shows possible values correctly
+      @Override
+      public String toString() {
+        return validator.toString();
+      }
+
+    };
+
+    public static String[] names() {
+      BehaviorOnMalformedDoc[] behaviors = values();
+      String[] result = new String[behaviors.length];
+
+      for (int i = 0; i < behaviors.length; i++) {
+        result[i] = behaviors[i].toString();
+      }
+
+      return result;
+    }
+
+    public static BehaviorOnMalformedDoc forValue(String value) {
+      return valueOf(value.toUpperCase(Locale.ROOT));
+    }
+
+    @Override
+    public String toString() {
+      return name().toLowerCase(Locale.ROOT);
+    }
+  }
 }
